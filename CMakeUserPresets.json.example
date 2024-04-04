@@ -1,0 +1,54 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 23,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "ubuntu",
+      "inherits": ["linux"],
+      "environment": {
+        "CLANG_PATH": "/usr/lib/llvm-17"
+      },
+      "vendor": {
+        "jetbrains.com/clion": {
+          "toolchain": "Ubuntu"
+        }
+      },
+      "hidden": true
+    },
+    {
+      "name": "ubuntu-ninja-clang-debug",
+      "inherits": ["default", "ubuntu", "ninja", "clang-linux-amd64", "debug"]
+    },
+    {
+      "name": "ubuntu-ninja-clang-release",
+      "inherits": ["default", "ubuntu", "ninja", "clang-linux-amd64", "release"]
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "ubuntu-ninja-clang-debug",
+      "configurePreset": "ubuntu-ninja-clang-debug"
+    },
+    {
+      "name": "ubuntu-ninja-clang-release",
+      "configurePreset": "ubuntu-ninja-clang-release"
+    }
+
+  ],
+  "packagePresets": [
+    {
+      "name": "default-deb",
+      "inherits": ["deb", "default"],
+      "configurePreset": "ubuntu-ninja-clang-release"
+    },
+    {
+      "name": "default-rpm",
+      "inherits": ["rpm", "default"],
+      "configurePreset": "ubuntu-ninja-clang-release"
+    }
+  ]
+}
