@@ -52,3 +52,5 @@ cmake-*/
 Debug/
 x64
 CMakeUserPresets.json
+*debug*
+*release*

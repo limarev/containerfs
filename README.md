@@ -1,1 +1,1 @@
-# cpp-template
+# containerfs — a modern C++20 library for mounting file-like containers (OLE, ZIP, TAR) from memory or files.
