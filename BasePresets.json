@@ -17,7 +17,7 @@
     },
     {
       "name": "vcpkg",
-      "toolchainFile": "$penv{VCPKG_TOOLCHAIN_DIR}/vcpkg.cmake",
+      "toolchainFile": "$penv{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
       "hidden": true
     },
     {
@@ -56,10 +56,10 @@
   "packagePresets": [
     {
       "name": "default",
-      "vendorName": "Some company",
-      "description": "Very useful tool",
+      "vendorName": "limarev",
+      "description": "Modern C++20 library for mounting file-like containers (OLE, ZIP, TAR) from memory or files",
       "variables": {
-        "CPACK_PACKAGE_CONTACT": "https://www.company.com"
+        "CPACK_PACKAGE_CONTACT": "https://github.com/limarev/containerfs"
       },
       "output": {
         "debug": false,

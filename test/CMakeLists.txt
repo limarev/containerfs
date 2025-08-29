@@ -1,19 +1,22 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(test_ole
+project(test_containerfs
         DESCRIPTION "Test ole module"
         LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD_REQUIRED 23)
 set(CMAKE_POSITION_INDEPENDENT_CODE TRUE)
 
+# First try to find libgsf with pkg-config
 find_package(PkgConfig)
-pkg_search_module(gsf REQUIRED IMPORTED_TARGET libgsf-1)
+pkg_search_module(gsf IMPORTED_TARGET libgsf-1)
 
+# Then try to find libgsf globally, whether or not libgsf have been found with pkg-config
+find_program(gsf NAMES gsf REQUIRED PATHS ${gsf_PREFIX}/bin)
 add_executable(test_ole2 test_read_file.cpp)
 
 find_package(GTest REQUIRED)
-target_link_libraries(test_ole2 PRIVATE ole GTest::gtest_main)
+target_link_libraries(test_ole2 PRIVATE containerfs GTest::gtest_main)
 ########################################################################################
 # These fixtures should be used as follows:
 # set_tests_properties(read_ole PROPERTIES FIXTURES_REQUIRED "READ_SETUP1;READ_SETUP2")
@@ -25,7 +28,7 @@ set_tests_properties(read_setup1 PROPERTIES FIXTURES_SETUP READ_SETUP1)
 
 # create ole file using gsf
 add_test(NAME read_setup2
-         COMMAND ${gsf_PREFIX}/bin/gsf createole test.ole root)
+         COMMAND ${gsf} createole test.ole root)
 set_tests_properties(read_setup2 PROPERTIES
                      FIXTURES_REQUIRED READ_SETUP1
                      FIXTURES_SETUP READ_SETUP2)

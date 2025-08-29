@@ -25,12 +25,42 @@
       "configurePreset": "build-release"
     }
   ],
+  "testPresets": [
+    {
+      "name": "build-release",
+      "configurePreset": "build-release",
+      "inherits": ["default"]
+    }
+  ],
   "packagePresets": [
     {
       "name": "build-release",
       "configurePreset": "build-release",
       "inherits": [
         "zip"
+      ]
+    }
+  ],
+  "workflowPresets": [
+    {
+      "name": "release",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "build-release"
+        },
+        {
+          "type": "build",
+          "name": "build-release"
+        },
+        {
+          "type": "test",
+          "name": "build-release"
+        },
+        {
+          "type": "package",
+          "name": "build-release"
+        }
       ]
     }
   ]
