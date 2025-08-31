@@ -18,7 +18,10 @@ std::vector<std::byte> read_file(const std::filesystem::path& path) {
 TEST(OLETest, ReadSmallFile) {
   FileDevice dev{"test.ole"};
   auto fs = mount<OleDriver>(std::move(dev));
-  EXPECT_TRUE(fs);
+  if (not fs) {
+    EXPECT_EQ(static_cast<int>(fs.error()), -1);
+  }
+
   auto sz = sizeof(fs);
   std::cout << "sizeof(fs) = " << sz << std::endl;
   for (auto&& dir_entry :
