@@ -3,6 +3,13 @@
 #include "containerfs/device_api.h"
 
 #include <iostream>
+#include <algorithm>
+
+inline static constexpr auto FREESECT   = 0xFFFFFFFF;
+inline static constexpr auto ENDOFCHAIN = 0xFFFFFFFE;
+inline static constexpr auto FATSECT    = 0xFFFFFFFD;
+inline static constexpr auto DIFSECT    = 0xFFFFFFFC;
+
 // ошибки драйвера OLE
 enum class OleError : std::uint8_t {
   Success = 0,
@@ -41,18 +48,14 @@ struct OleHeader {
   std::array<std::uint32_t, 109> difat{};
 };
 
-template <typename Device> class OleDriver final {
-public:
-  using error_type = OleError;
-
-  // Фабрика: читает и валидирует заголовок, создаёт валидный драйвер
-  static std::expected<OleDriver, error_type> create(Device &&dev) {
+template<typename Device>
+std::expected<OleHeader, OleError> load_header(Device& device) {
     /** header всегда 512 байт:
      * For version 4 compound files, the header size (512 bytes) is less than the sector size (4,096 bytes),
      * so the remaining part of the header (3,584 bytes) MUST be filled with all zeroes.
      */
     std::array<std::byte, sizeof(OleHeader)> buffer{};
-    if (!dev.read_at(0, buffer)) {
+    if (!device.read_at(0, buffer)) {
       return std::unexpected(OleError::IoFailure);
     }
 
@@ -169,10 +172,59 @@ public:
       return std::unexpected(OleError::InvalidMiniCutoff);
     }
 
+  return hdr;
+}
+
+std::uint64_t sector_offset(uint32_t sector, uint32_t sector_size) noexcept {
+  return static_cast<std::uint64_t>(sector + 1) * sector_size;
+}
+
+template<typename Device>
+std::expected<std::vector<uint32_t>, OleError> load_fat(Device& device, const OleHeader& header) {
+  const auto sector_size = 1 << header.sector_shift;
+  size_t total_fat_entries = 0;
+  for (auto sector : header.difat) {
+    if (sector != FREESECT) total_fat_entries += sector_size / sizeof(uint32_t);
+  }
+
+  std::vector<uint32_t> fat;
+  fat.resize(total_fat_entries);
+
+  size_t offset = 0;
+  for (auto sector : header.difat) {
+    if (sector == FREESECT) continue;
+
+    std::vector<std::byte> buf(sector_size);
+    if (!device.read_at(sector_offset(sector, sector_size), buf))
+      return std::unexpected(OleError::IoFailure);
+    // каждая запись FAT = uint32_t
+    auto* p = reinterpret_cast<uint32_t*>(buf.data());
+    size_t n = sector_size / sizeof(uint32_t);
+    std::copy_n(p, n, fat.begin() + offset);
+    offset += n;
+  }
+
+  // TODO: загрузить цепочку дополнительных DIFAT-секторов, если hdr_.num_difat_sectors > 0
+  return fat;
+}
+
+template <typename Device> class OleDriver final {
+public:
+  using error_type = OleError;
+
+  static std::expected<OleDriver, error_type> create(Device &&dev) {
+    auto header = load_header(dev);
+    if (not header) {
+      return std::unexpected(header.error());
+    }
+
+    auto fat = load_fat(dev, *header);
+    if (not fat) {
+      return std::unexpected(fat.error());
+    }
+
     OleDriver driver{std::move(dev)};
-    driver.hdr_ = hdr;
-    driver.sector_size_ = 1 << hdr.sector_shift;
-    driver.mini_sector_size_ = 1 << hdr.mini_sector_shift;
+    driver.hdr_ = *header;
 
     return driver;
   }
@@ -188,6 +240,4 @@ private:
 
   Device dev_;
   OleHeader hdr_{};
-  std::uint32_t sector_size_{512};
-  std::uint32_t mini_sector_size_{64};
 };
