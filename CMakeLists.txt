@@ -15,7 +15,11 @@ add_library(containerfs::containerfs ALIAS containerfs)
 target_sources(containerfs
                PRIVATE
                sources/ole.cpp
-               include/ole/ole.h)
+
+               include/containerfs/ole.h
+               include/containerfs/device_api.h
+               include/containerfs/file_device.h
+               include/containerfs/filesystem.h)
 
 target_include_directories(containerfs
                            PUBLIC
