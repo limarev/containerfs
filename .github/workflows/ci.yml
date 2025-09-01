@@ -5,6 +5,10 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   build:
     runs-on: ${{ matrix.os }}
@@ -15,13 +19,25 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Set up vcpkg
-        uses: lukka/run-vcpkg@v11
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
         with:
-          vcpkgGitCommitId: 'dd3097e305afa53f7b4312371f62058d2e665320'
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install libgsf (for tests only)
-        run: sudo apt-get -y install libgsf-bin
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/containerfs-ci:latest
+            ghcr.io/${{ github.repository_owner }}/containerfs-ci:${{ github.sha }}
 
-      - name: Run release workflow
-        run: cmake --workflow --preset release
+      - name: Test using published image
+        run: |
+          docker pull ghcr.io/${{ github.repository_owner }}/containerfs-ci:latest
+          docker run --rm -v ${{ github.workspace }}:/workspace -w /workspace ghcr.io/${{ github.repository_owner }}/containerfs-ci:latest cmake --workflow --preset release
+
