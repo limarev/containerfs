@@ -3,6 +3,13 @@
 #include "containerfs/device_api.h"
 
 #include <iostream>
+#include <algorithm>
+
+inline static constexpr auto FREESECT   = 0xFFFFFFFF;
+inline static constexpr auto ENDOFCHAIN = 0xFFFFFFFE;
+inline static constexpr auto FATSECT    = 0xFFFFFFFD;
+inline static constexpr auto DIFSECT    = 0xFFFFFFFC;
+
 // ошибки драйвера OLE
 enum class OleError : std::uint8_t {
   Success = 0,
@@ -177,7 +184,7 @@ std::expected<std::vector<uint32_t>, OleError> load_fat(Device& device, const Ol
   const auto sector_size = 1 << header.sector_shift;
   size_t total_fat_entries = 0;
   for (auto sector : header.difat) {
-    if (sector != 0xFFFFFFFF) total_fat_entries += sector_size / sizeof(uint32_t);
+    if (sector != FREESECT) total_fat_entries += sector_size / sizeof(uint32_t);
   }
 
   std::vector<uint32_t> fat;
@@ -185,7 +192,7 @@ std::expected<std::vector<uint32_t>, OleError> load_fat(Device& device, const Ol
 
   size_t offset = 0;
   for (auto sector : header.difat) {
-    if (sector == 0xFFFFFFFF) continue; // FREESECT
+    if (sector == FREESECT) continue;
 
     std::vector<std::byte> buf(sector_size);
     if (!device.read_at(sector_offset(sector, sector_size), buf))
