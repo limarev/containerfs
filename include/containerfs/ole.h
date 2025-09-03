@@ -23,7 +23,8 @@ enum class OleError : std::uint8_t {
   UnsupportedMinorVersion,
   InvalidCLSID,
   InvalidReservedField,
-  InvalidNumberOfDirectorySectors
+  InvalidNumberOfDirectorySectors,
+  CorruptedFile
 };
 
 // POD заголовок (минимально нужные поля)
@@ -175,36 +176,60 @@ std::expected<OleHeader, OleError> load_header(Device& device) {
   return hdr;
 }
 
-std::uint64_t sector_offset(uint32_t sector, uint32_t sector_size) noexcept {
-  return static_cast<std::uint64_t>(sector + 1) * sector_size;
+inline bool is_reserved_sid(std::uint32_t sid) noexcept {
+  return sid == FREESECT || sid == ENDOFCHAIN || sid == FATSECT || sid == DIFSECT;
 }
 
 template<typename Device>
 std::expected<std::vector<uint32_t>, OleError> load_fat(Device& device, const OleHeader& header) {
   const auto sector_size = 1 << header.sector_shift;
-  size_t total_fat_entries = 0;
-  for (auto sector : header.difat) {
-    if (sector != FREESECT) total_fat_entries += sector_size / sizeof(uint32_t);
-  }
 
-  std::vector<uint32_t> fat;
-  fat.resize(total_fat_entries);
+  // Список sector ID-ов FAT-секторов (строго по csectFat)
+  std::vector<std::uint32_t> fat_sector_ids;
+  fat_sector_ids.reserve(header.num_fat_sectors);
 
-  size_t offset = 0;
-  for (auto sector : header.difat) {
-    if (sector == FREESECT) continue;
+  /**
+   * Непонятно что делать, если в этой цепочке появляется FREESECT.
+   * https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cfb/0afa4e43-b18f-432a-9917-4f276eca7a73
+   * Документация не запрещает здесь FREESECT, а после него валидные значения.
+   * Зачем так делать непонятно.
+   */
+  std::ranges::copy_if(header.difat, std::back_inserter(fat_sector_ids), [](auto sector){ return sector != FREESECT; });
 
-    std::vector<std::byte> buf(sector_size);
-    if (!device.read_at(sector_offset(sector, sector_size), buf))
+  // Смещение сектора (SID) в байтах (OLE: заголовок = "нулевой сектор")
+  auto sector_offset = [](std::uint32_t sid, std::size_t sector_size) -> std::uint64_t {return (static_cast<std::uint64_t>(sid) + 1) * static_cast<std::uint64_t>(sector_size);};
+  // читаем цепочку DIFAT-секторов
+  for (auto next_difat= header.first_difat_sector; next_difat != ENDOFCHAIN;) {
+    std::vector<std::uint32_t> buf(sector_size / sizeof(uint32_t));
+    if (!device.read_at(sector_offset(next_difat, sector_size), as_writable_bytes(std::span{buf}))) [[unlikely]] {
       return std::unexpected(OleError::IoFailure);
-    // каждая запись FAT = uint32_t
-    auto* p = reinterpret_cast<uint32_t*>(buf.data());
-    size_t n = sector_size / sizeof(uint32_t);
-    std::copy_n(p, n, fat.begin() + offset);
-    offset += n;
+    }
+
+    // читаем весь сектор
+    std::ranges::copy_if(buf, std::back_inserter(fat_sector_ids), [](auto sector){ return sector != FREESECT; });
+
+    // последняя uint32_t запись в секторе - это номер следующего difat сектора
+    next_difat = fat_sector_ids.back();
+    // удаляем последнюю запись, так как мы хотим хранить только fat сектора, а не служебные difat
+    fat_sector_ids.pop_back();
   }
 
-  // TODO: загрузить цепочку дополнительных DIFAT-секторов, если hdr_.num_difat_sectors > 0
+  if (fat_sector_ids.size() != header.num_fat_sectors) {
+    return std::unexpected(OleError::CorruptedFile);
+  }
+
+  // 2) Читаем сами FAT-сектора и склеиваем единый FAT
+  std::vector<std::uint32_t> fat;
+  fat.reserve(fat_sector_ids.size() * sector_size / sizeof(uint32_t));
+
+  for (auto fat_sid : fat_sector_ids) {
+    std::vector<std::uint32_t> buf(sector_size);
+    if (!device.read_at(sector_offset(fat_sid, sector_size), as_writable_bytes(std::span{buf}))) [[unlikely]] {
+      return std::unexpected(OleError::IoFailure);
+    }
+    std::ranges::copy(buf, std::back_inserter(fat));
+  }
+
   return fat;
 }
 
