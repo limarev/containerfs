@@ -16,7 +16,9 @@ std::vector<std::byte> read_file(const std::filesystem::path& path) {
 }
 
 TEST(OLETest, ReadSmallFile) {
-  FileDevice dev{"test.ole"};
+  const std::filesystem::path file{"test.ole"};
+  EXPECT_TRUE(exists(file));
+  FileDevice dev{file};
   auto fs = mount<OleDriver>(std::move(dev));
   if (not fs) {
     EXPECT_EQ(static_cast<int>(fs.error()), -1);

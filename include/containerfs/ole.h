@@ -2,13 +2,17 @@
 
 #include "containerfs/device_api.h"
 
-#include <iostream>
 #include <algorithm>
+#include <cassert>
+#include <cstddef>
+#include <iostream>
+#include <iterator>
+#include <ranges>
 
-inline static constexpr auto FREESECT   = 0xFFFFFFFF;
+inline static constexpr auto FREESECT = 0xFFFFFFFF;
 inline static constexpr auto ENDOFCHAIN = 0xFFFFFFFE;
-inline static constexpr auto FATSECT    = 0xFFFFFFFD;
-inline static constexpr auto DIFSECT    = 0xFFFFFFFC;
+inline static constexpr auto FATSECT = 0xFFFFFFFD;
+inline static constexpr auto DIFSECT = 0xFFFFFFFC;
 
 // ошибки драйвера OLE
 enum class OleError : std::uint8_t {
@@ -26,6 +30,8 @@ enum class OleError : std::uint8_t {
   InvalidNumberOfDirectorySectors,
   CorruptedFile
 };
+
+using fat_t = std::uint32_t;
 
 // POD заголовок (минимально нужные поля)
 struct OleHeader {
@@ -49,51 +55,58 @@ struct OleHeader {
   std::array<std::uint32_t, 109> difat{};
 };
 
-template<typename Device>
-std::expected<OleHeader, OleError> load_header(Device& device) {
-    /** header всегда 512 байт:
-     * For version 4 compound files, the header size (512 bytes) is less than the sector size (4,096 bytes),
-     * so the remaining part of the header (3,584 bytes) MUST be filled with all zeroes.
-     */
-    std::array<std::byte, sizeof(OleHeader)> buffer{};
-    if (!device.read_at(0, buffer)) {
-      return std::unexpected(OleError::IoFailure);
-    }
+constexpr auto operator|(std::ranges::range auto &&src, std::ranges::sized_range auto &dst) {
+  auto d = std::as_writable_bytes(std::span(dst));
+  auto res = std::ranges::copy_n(src.begin(), d.size(), d.begin());
+  return std::ranges::subrange(res.in, src.end());
+}
 
-    OleHeader hdr{};
-    const auto *p = buffer.data();
+constexpr auto operator|(std::ranges::range auto &&src, std::integral auto &dst) {
+  std::span<std::byte, sizeof(dst)> d{reinterpret_cast<std::byte *>(std::addressof(dst)), sizeof(dst)};
+  return src | d;
+}
 
-    auto read = [&]<typename T>(T &value) {
-      if constexpr (std::is_array_v<T>) {
-        std::copy_n(p, value.size(), reinterpret_cast<std::byte *>(value.data()));
-        p += value.size();
-      } else {
-        std::copy_n(p, sizeof(T), reinterpret_cast<std::byte *>(&value));
-        p += sizeof(T);
-      }
-    };
+constexpr auto operator|(std::ranges::range auto &&src, std::byte &dst) {
+  auto res = std::ranges::copy_n(src.begin(), sizeof(dst), std::addressof(dst));
+  return std::ranges::subrange(res.in, src.end());
+}
 
-    read(hdr.magic);
-    read(hdr.clsid);
-    read(hdr.minor_version);
-    read(hdr.major_version);
-    read(hdr.byte_order);
-    read(hdr.sector_shift);
-    read(hdr.mini_sector_shift);
-    read(hdr.reserved);
-    read(hdr.num_dir_sectors);
-    read(hdr.num_fat_sectors);
-    read(hdr.first_dir_sector);
-    read(hdr.transaction_signature);
-    read(hdr.mini_stream_cutoff_size);
-    read(hdr.first_mini_fat_sector);
-    read(hdr.num_mini_fat_sectors);
-    read(hdr.first_difat_sector);
-    read(hdr.num_difat_sectors);
-    for (auto &d : hdr.difat) {
-      read(d);
-    }
+template <typename Device, bool Validate = true>
+std::expected<OleHeader, OleError> load_header(Device &device) {
+  /** header всегда 512 байт:
+   * For version 4 compound files, the header size (512 bytes) is less than the sector size (4,096 bytes),
+   * so the remaining part of the header (3,584 bytes) MUST be filled with all zeroes.
+   */
+  static_assert(sizeof(OleHeader) == 512);
+  std::array<std::byte, sizeof(OleHeader)> buffer{};
+  if (!device.read_at(0, buffer)) {
+    return std::unexpected(OleError::IoFailure);
+  }
 
+  OleHeader hdr{};
+  [[ maybe_unused ]] const auto tail = buffer
+  | hdr.magic
+  | hdr.clsid
+  | hdr.minor_version
+  | hdr.major_version
+  | hdr.byte_order
+  | hdr.sector_shift
+  | hdr.mini_sector_shift
+  | hdr.reserved
+  | hdr.num_dir_sectors
+  | hdr.num_fat_sectors
+  | hdr.first_dir_sector
+  | hdr.transaction_signature
+  | hdr.mini_stream_cutoff_size
+  | hdr.first_mini_fat_sector
+  | hdr.num_mini_fat_sectors
+  | hdr.first_difat_sector
+  | hdr.num_difat_sectors
+  | hdr.difat;
+
+  assert(empty(tail));
+
+  if constexpr (Validate) {
     /**
      * Header Signature (8 bytes): Identification signature for the compound file structure,
      * and MUST be set to the value 0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1.
@@ -131,13 +144,14 @@ std::expected<OleHeader, OleError> load_header(Device& device) {
       return std::unexpected(OleError::WrongByteOrder);
 
     /**
-    * Sector Shift (2 bytes): This field MUST be set to 0x0009, or 0x000c, depending on the Major Version field.
-    * This field specifies the sector size of the compound file as a power of 2.
-    * If Major Version is 3, the Sector Shift MUST be 0x0009, specifying a sector size of 512 bytes.
-    * If Major Version is 4, the Sector Shift MUST be 0x000C, specifying a sector size of 4096 bytes.
+     * Sector Shift (2 bytes): This field MUST be set to 0x0009, or 0x000c, depending on the Major Version field.
+     * This field specifies the sector size of the compound file as a power of 2.
+     * If Major Version is 3, the Sector Shift MUST be 0x0009, specifying a sector size of 512 bytes.
+     * If Major Version is 4, the Sector Shift MUST be 0x000C, specifying a sector size of 4096 bytes.
      */
-    if (const auto valid = (hdr.major_version == 3 && hdr.sector_shift == 9) || (hdr.major_version == 4 && hdr.sector_shift == 12);
-      not valid)
+    if (const auto valid =
+            (hdr.major_version == 3 && hdr.sector_shift == 9) || (hdr.major_version == 4 && hdr.sector_shift == 12);
+        not valid)
       return std::unexpected(OleError::InvalidSectorShift);
 
     /**
@@ -165,13 +179,14 @@ std::expected<OleHeader, OleError> load_header(Device& device) {
 
     /**
      * Mini Stream Cutoff Size (4 bytes): This integer field MUST be set to 0x00001000.
-     * This field specifies the maximum size of a user-defined data stream that is allocated from the mini FAT and mini stream,
-     * and that cutoff is 4096 bytes. Any user-defined data stream that is greater than or equal to this cutoff size
-     * must be allocated as normal sectors from the FAT.
+     * This field specifies the maximum size of a user-defined data stream that is allocated from the mini FAT and mini
+     * stream, and that cutoff is 4096 bytes. Any user-defined data stream that is greater than or equal to this cutoff
+     * size must be allocated as normal sectors from the FAT.
      */
     if (hdr.mini_stream_cutoff_size != 4096) {
       return std::unexpected(OleError::InvalidMiniCutoff);
     }
+  }
 
   return hdr;
 }
@@ -180,12 +195,12 @@ inline bool is_reserved_sid(std::uint32_t sid) noexcept {
   return sid == FREESECT || sid == ENDOFCHAIN || sid == FATSECT || sid == DIFSECT;
 }
 
-template<typename Device>
-std::expected<std::vector<uint32_t>, OleError> load_fat(Device& device, const OleHeader& header) {
+template <typename Device, bool Validate = true>
+std::expected<std::vector<fat_t>, OleError> load_fat(Device &device, const OleHeader &header) {
   const auto sector_size = 1 << header.sector_shift;
 
   // Список sector ID-ов FAT-секторов (строго по csectFat)
-  std::vector<std::uint32_t> fat_sector_ids;
+  std::vector<fat_t> fat_sector_ids;
   fat_sector_ids.reserve(header.num_fat_sectors);
 
   /**
@@ -194,19 +209,22 @@ std::expected<std::vector<uint32_t>, OleError> load_fat(Device& device, const Ol
    * Документация не запрещает здесь FREESECT, а после него валидные значения.
    * Зачем так делать непонятно.
    */
-  std::ranges::copy_if(header.difat, std::back_inserter(fat_sector_ids), [](auto sector){ return sector != FREESECT; });
+  std::ranges::copy_if(header.difat, std::back_inserter(fat_sector_ids),
+                       [](auto sector) { return sector != FREESECT; });
 
   // Смещение сектора (SID) в байтах (OLE: заголовок = "нулевой сектор")
-  auto sector_offset = [](std::uint32_t sid, std::size_t sector_size) -> std::uint64_t {return (static_cast<std::uint64_t>(sid) + 1) * static_cast<std::uint64_t>(sector_size);};
+  auto sector_offset = [](fat_t sid, std::uint16_t sector_size) -> std::uint64_t {
+    return (sid + 1) * static_cast<std::uint64_t>(sector_size);
+  };
   // читаем цепочку DIFAT-секторов
-  for (auto next_difat= header.first_difat_sector; next_difat != ENDOFCHAIN;) {
-    std::vector<std::uint32_t> buf(sector_size / sizeof(uint32_t));
+  for (auto next_difat = header.first_difat_sector; next_difat != ENDOFCHAIN;) {
+    std::vector<fat_t> buf(sector_size / sizeof(fat_t));
     if (!device.read_at(sector_offset(next_difat, sector_size), as_writable_bytes(std::span{buf}))) [[unlikely]] {
       return std::unexpected(OleError::IoFailure);
     }
 
     // читаем весь сектор
-    std::ranges::copy_if(buf, std::back_inserter(fat_sector_ids), [](auto sector){ return sector != FREESECT; });
+    std::ranges::copy_if(buf, std::back_inserter(fat_sector_ids), [](auto sector) { return sector != FREESECT; });
 
     // последняя uint32_t запись в секторе - это номер следующего difat сектора
     next_difat = fat_sector_ids.back();
@@ -219,18 +237,101 @@ std::expected<std::vector<uint32_t>, OleError> load_fat(Device& device, const Ol
   }
 
   // 2) Читаем сами FAT-сектора и склеиваем единый FAT
-  std::vector<std::uint32_t> fat;
+  std::vector<fat_t> fat;
   fat.reserve(fat_sector_ids.size() * sector_size / sizeof(uint32_t));
 
   for (auto fat_sid : fat_sector_ids) {
-    std::vector<std::uint32_t> buf(sector_size);
+    std::vector<fat_t> buf(sector_size / sizeof(fat_t));
     if (!device.read_at(sector_offset(fat_sid, sector_size), as_writable_bytes(std::span{buf}))) [[unlikely]] {
       return std::unexpected(OleError::IoFailure);
     }
     std::ranges::copy(buf, std::back_inserter(fat));
   }
 
+  std::cout << std::format("number fat sectors: expected: {}, actual: {}", header.num_fat_sectors, size(fat)) << '\n';
+  std::ranges::transform(fat, std::ostream_iterator<std::string>(std::cout, "\n"), [](auto v) -> std::string {
+    switch (v) {
+    case FREESECT:
+      return "FREESECT";
+    case FATSECT:
+      return "FATSECT";
+    case DIFSECT:
+      return "DIFSECT";
+    case ENDOFCHAIN:
+      return "ENDOFCHAIN";
+    default:
+      return std::format("{:08X}", v);
+    }
+  });
+  // TODO валидация fat
   return fat;
+}
+
+struct DirectoryEntry {
+  std::byte object_type;
+  std::byte color_flag;
+  std::uint16_t name_size_in_bytes;
+  std::array<std::byte, 16> clsid;
+  std::uint32_t left_id;
+  std::uint32_t right_id;
+  std::uint32_t child_id;
+  std::uint32_t state_bits;
+  std::uint32_t starting_sector;
+  std::uint64_t creation_time;
+  std::uint64_t modified_time;
+  std::uint64_t stream_size;
+  std::array<std::byte, 64> name;
+};
+
+template <typename Device, bool Validate = true>
+std::expected<std::vector<DirectoryEntry>, OleError> load_directories(Device &device, const OleHeader &header,
+                                                                      const std::vector<fat_t> &fat) {
+  const auto sector_size = 1 << header.sector_shift;
+  static_assert(sizeof(DirectoryEntry) == 128);
+  // идём по FAT-цепочке, начиная с first_dir_sector. Alloc на 32 временно, потом надо посчитать на сколько именно
+  // аллокать
+  std::vector<DirectoryEntry> dir_stream;
+  dir_stream.reserve(header.num_dir_sectors == 0 ? 32 : header.num_dir_sectors);
+
+  auto sector_offset = [](fat_t sid, std::uint16_t sector_size) -> std::uint64_t {
+    return (sid + 1) * static_cast<std::uint64_t>(sector_size);
+  };
+
+  for (auto next_sector = header.first_dir_sector; next_sector != ENDOFCHAIN; next_sector = fat[next_sector]) {
+    // The directory entry size is fixed at 128 bytes.
+    std::vector<DirectoryEntry> buf(sector_size / sizeof(DirectoryEntry));
+    if (!device.read_at(sector_offset(next_sector, sector_size), as_writable_bytes(std::span{buf}))) [[unlikely]] {
+      return std::unexpected(OleError::IoFailure);
+    }
+
+    std::ranges::move(buf, std::back_inserter(dir_stream));
+  }
+
+  for (auto&& dir : dir_stream) {
+    std::span<std::byte, sizeof(DirectoryEntry)> view{reinterpret_cast<std::byte *>(std::addressof(dir)), sizeof(DirectoryEntry)};
+    DirectoryEntry entry{};
+    [[maybe_unused]] const auto tail = view
+    | entry.name
+    | entry.name_size_in_bytes
+    | entry.object_type
+    | entry.color_flag
+    | entry.left_id
+    | entry.right_id
+    | entry.child_id
+    | entry.clsid
+    | entry.state_bits
+    | entry.creation_time
+    | entry.modified_time
+    | entry.starting_sector
+    | entry.stream_size;
+
+    assert(empty(tail));
+    std::swap(entry, dir);
+  }
+
+  // TODO directory entry validation
+
+  return dir_stream;
 }
 
 template <typename Device> class OleDriver final {
@@ -245,6 +346,11 @@ public:
 
     auto fat = load_fat(dev, *header);
     if (not fat) {
+      return std::unexpected(fat.error());
+    }
+
+    auto directories = load_directories(dev, *header, *fat);
+    if (not directories) {
       return std::unexpected(fat.error());
     }
 

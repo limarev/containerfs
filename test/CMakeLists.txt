@@ -48,5 +48,6 @@ add_test(NAME read_cleanup2
          COMMAND ${CMAKE_COMMAND} -E rm test.ole)
 set_tests_properties(read_cleanup2 PROPERTIES
                      FIXTURES_REQUIRED READ_SETUP1
-                     FIXTURES_CLEANUP READ_SETUP2)
+                     FIXTURES_CLEANUP READ_SETUP2
+                     DISABLED False)
 ########################################################################################
