@@ -28,7 +28,8 @@ enum class OleError : std::uint8_t {
   InvalidCLSID,
   InvalidReservedField,
   InvalidNumberOfDirectorySectors,
-  CorruptedFile
+  CorruptedFile,
+  MiniFatHeaderInconsistent
 };
 
 using fat_t = std::uint32_t;
@@ -71,6 +72,11 @@ constexpr auto operator|(std::ranges::range auto &&src, std::byte &dst) {
   return std::ranges::subrange(res.in, src.end());
 }
 
+// Смещение сектора (SID) в байтах (OLE: заголовок = "нулевой сектор")
+constexpr auto sector_offset (fat_t sid, std::uint16_t sector_size) -> std::uint64_t {
+  return (sid + 1) * static_cast<std::uint64_t>(sector_size);
+}
+
 template <typename Device, bool Validate = true>
 std::expected<OleHeader, OleError> load_header(Device &device) {
   /** header всегда 512 байт:
@@ -82,7 +88,7 @@ std::expected<OleHeader, OleError> load_header(Device &device) {
   if (!device.read_at(0, buffer)) {
     return std::unexpected(OleError::IoFailure);
   }
-
+  // TODO bitcast to wire type
   OleHeader hdr{};
   [[ maybe_unused ]] const auto tail = buffer
   | hdr.magic
@@ -186,6 +192,19 @@ std::expected<OleHeader, OleError> load_header(Device &device) {
     if (hdr.mini_stream_cutoff_size != 4096) {
       return std::unexpected(OleError::InvalidMiniCutoff);
     }
+
+    /**
+     * Утверждения hdr.first_mini_fat_sector != ENDOFCHAIN и hdr.num_mini_fat_sectors != 0
+     * должны быть оба True либо оба False.
+     */
+    {
+      const auto exists = hdr.first_mini_fat_sector != ENDOFCHAIN;
+      const auto at_least_one = hdr.num_mini_fat_sectors != 0;
+      if (const auto valid = exists == at_least_one; not valid) {
+        return std::unexpected(OleError::MiniFatHeaderInconsistent);
+      }
+    }
+
   }
 
   return hdr;
@@ -212,10 +231,6 @@ std::expected<std::vector<fat_t>, OleError> load_fat(Device &device, const OleHe
   std::ranges::copy_if(header.difat, std::back_inserter(fat_sector_ids),
                        [](auto sector) { return sector != FREESECT; });
 
-  // Смещение сектора (SID) в байтах (OLE: заголовок = "нулевой сектор")
-  auto sector_offset = [](fat_t sid, std::uint16_t sector_size) -> std::uint64_t {
-    return (sid + 1) * static_cast<std::uint64_t>(sector_size);
-  };
   // читаем цепочку DIFAT-секторов
   for (auto next_difat = header.first_difat_sector; next_difat != ENDOFCHAIN;) {
     std::vector<fat_t> buf(sector_size / sizeof(fat_t));
@@ -279,7 +294,7 @@ struct DirectoryEntry {
   std::uint32_t starting_sector;
   std::uint64_t creation_time;
   std::uint64_t modified_time;
-  std::uint64_t stream_size;
+  std::uint64_t stream_size; // in bytes
   std::array<std::byte, 64> name;
 };
 
@@ -293,10 +308,7 @@ std::expected<std::vector<DirectoryEntry>, OleError> load_directories(Device &de
   std::vector<DirectoryEntry> dir_stream;
   dir_stream.reserve(header.num_dir_sectors == 0 ? 32 : header.num_dir_sectors);
 
-  auto sector_offset = [](fat_t sid, std::uint16_t sector_size) -> std::uint64_t {
-    return (sid + 1) * static_cast<std::uint64_t>(sector_size);
-  };
-
+  // TODO bitcast to wire type
   for (auto next_sector = header.first_dir_sector; next_sector != ENDOFCHAIN; next_sector = fat[next_sector]) {
     // The directory entry size is fixed at 128 bytes.
     std::vector<DirectoryEntry> buf(sector_size / sizeof(DirectoryEntry));
@@ -334,6 +346,29 @@ std::expected<std::vector<DirectoryEntry>, OleError> load_directories(Device &de
   return dir_stream;
 }
 
+template <typename Device, bool Validate = true>
+std::expected<std::vector<fat_t>, OleError> load_minifat(Device &device, int sector_size, uint32_t first_mini_fat_sector, uint32_t num_mini_fat_sectors, uint32_t mini_sectors_count, const std::vector<fat_t> &fat) {
+  std::vector<fat_t> result; result.reserve(num_mini_fat_sectors);
+
+  // читаем цепочку miniFAT-секторов
+  for (auto next_sector = first_mini_fat_sector; next_sector != ENDOFCHAIN; next_sector = fat[next_sector]) {
+    std::vector<fat_t> buf(sector_size / sizeof(fat_t));
+    if (!device.read_at(sector_offset(next_sector, sector_size), as_writable_bytes(std::span{buf}))) [[unlikely]] {
+      return std::unexpected(OleError::IoFailure);
+    }
+    // читаем весь сектор
+    std::ranges::copy_if(buf, std::back_inserter(result), [](auto sector) { return sector != FREESECT; });
+  }
+
+  if constexpr (Validate) {
+    if (result.size() != mini_sectors_count) {
+      return std::unexpected(OleError::CorruptedFile);
+    }
+  }
+
+  return result;
+}
+
 template <typename Device> class OleDriver final {
 public:
   using error_type = OleError;
@@ -351,8 +386,19 @@ public:
 
     auto directories = load_directories(dev, *header, *fat);
     if (not directories) {
-      return std::unexpected(fat.error());
+      return std::unexpected(directories.error());
     }
+
+    auto mini_sectors_count = directories->front().stream_size / (1 << header->mini_sector_shift);
+    auto minifat = load_minifat(dev, 1 << header->sector_shift, header->first_mini_fat_sector, header->num_mini_fat_sectors, mini_sectors_count, *fat);
+    if (not minifat) {
+      return std::unexpected(minifat.error());
+    }
+
+    // auto ministream = load_ministream(dev);
+    // if (not ministream) {
+    //   return std::unexpected(ministream.error());
+    // }
 
     OleDriver driver{std::move(dev)};
     driver.hdr_ = *header;
