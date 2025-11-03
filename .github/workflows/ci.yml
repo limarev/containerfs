@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: 'dd3097e305afa53f7b4312371f62058d2e665320'
+
+      - name: Install libgsf (for tests only)
+        run: sudo apt-get -y install libgsf-bin
+
+      - name: Run release workflow
+        run: cmake --workflow --preset release
