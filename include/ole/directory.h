@@ -1,7 +1,7 @@
 #pragma once
 
-#include "ole_path.h"
-#include "ole_string.h"
+#include "path.h"
+#include "string.h"
 
 #include <algorithm>
 #include <ranges>

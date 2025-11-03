@@ -2,7 +2,7 @@
 
 #include <filesystem>
 
-#include "ole_string.h"
+#include "string.h"
 
 #include <ostream>
 #include <vector>

@@ -1,9 +1,9 @@
-#include "containerfs/ole.h"
-#include "containerfs/filesystem.h"
+#include "ole/file_device.h"
+#include "ole/filesystem.h"
 
 #include <gtest/gtest.h>
+#include <fstream>
 #include <vector>
-#include <iostream>
 
 namespace ole {
 template<typename T>
@@ -11,8 +11,6 @@ std::ostream& operator<<(std::ostream& os, T t) requires (std::is_enum_v<T>) {
   return os << static_cast<std::streamsize>(t);
 }
 }
-
-using namespace containerfs;
 
 std::vector<std::byte> read_file(const std::filesystem::path& path) {
   std::ifstream file{path, std::ios::binary | std::ios::in};
@@ -28,9 +26,9 @@ TEST(Exists, Positive) {
 
   const path file{"exists.ole"};
   EXPECT_TRUE(exists(file));
-  FileDevice dev{file};
+  ole::FileDevice dev{file};
 
-  auto fs = mount<OleDriver>(std::move(dev));
+  auto fs = ole::Filesystem::mount(std::move(dev));
   EXPECT_TRUE(fs) << fs.error();
 
   for (auto&& dir_entry : recursive_directory_iterator("exists")) {
@@ -46,9 +44,9 @@ TEST(Exists, Negative) {
 
   const path file{"exists.ole"};
   EXPECT_TRUE(exists(file));
-  FileDevice dev{file};
+  ole::FileDevice dev{file};
 
-  auto fs = mount<OleDriver>(std::move(dev));
+  auto fs = ole::Filesystem::mount(std::move(dev));
   EXPECT_TRUE(fs) << fs.error();
 
   {
@@ -65,12 +63,42 @@ TEST(Exists, Negative) {
   }
 }
 
+TEST(FileSize, Positive) {
+  using namespace std::filesystem;
+
+  const path file{"exists.ole"};
+  EXPECT_TRUE(exists(file));
+  ole::FileDevice dev{file};
+
+  auto fs = ole::Filesystem::mount(std::move(dev));
+  EXPECT_TRUE(fs) << fs.error();
+
+  {
+    auto size = fs->file_size({});
+    EXPECT_FALSE(size);
+    EXPECT_EQ(size.error(), ole::Error::FileNotFound);
+  }
+
+  for (auto&& dir_entry : recursive_directory_iterator("exists")) {
+    auto p = ole::Path::make(dir_entry.path());
+    EXPECT_TRUE(p) << p.error();
+    if (dir_entry.is_directory()) {
+      auto size = fs->file_size(*p);
+      EXPECT_FALSE(size);
+      EXPECT_EQ(size.error(), ole::Error::NotRegularFile);
+    } else {
+      EXPECT_EQ(dir_entry.file_size(), fs->file_size(*p)) << dir_entry << *p;
+    }
+  }
+}
+
+
 TEST(OLETest, DISABLED_ReadSmallFile) {
   const std::filesystem::path file{"test.ole"};
   EXPECT_TRUE(exists(file));
-  FileDevice dev{file};
+  ole::FileDevice dev{file};
 
-  auto fs = mount<OleDriver>(std::move(dev));
+  auto fs = ole::Filesystem::mount(std::move(dev));
   if (not fs) {
     EXPECT_EQ(static_cast<int>(fs.error()), -1);
   }

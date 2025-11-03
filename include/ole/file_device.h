@@ -1,13 +1,10 @@
 #pragma once
 
-#include "namespace.h"
-
 #include <filesystem>
 #include <fstream>
 #include <span>
 
-CONTAINERFS_NAMESPACE_BEGIN
-
+namespace ole {
 class FileDevice final {
 public:
   explicit FileDevice(const std::filesystem::path& path): dev_{std::make_unique<std::ifstream>(path, std::ios::binary | std::ios::in)} {}
@@ -26,5 +23,4 @@ public:
 private:
   std::unique_ptr<std::istream> dev_;
 };
-
-CONTAINERFS_NAMESPACE_END
+}

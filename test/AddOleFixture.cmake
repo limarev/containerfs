@@ -71,7 +71,7 @@ foreach(d IN LISTS DIRS)
   file(MAKE_DIRECTORY \${d})
 endforeach()
 foreach(f IN LISTS FILES)
-  file(WRITE \${f} \"\")
+  file(WRITE \${f} \"qwerty\")
 endforeach()
 ")
     # Setup: create tree

@@ -4,7 +4,7 @@
 #include <expected>
 #include <filesystem>
 
-#include "ole_error.h"
+#include "error.h"
 
 namespace ole {
 class String final {

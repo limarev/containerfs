@@ -23,6 +23,8 @@ enum class Error : std::uint8_t {
   Exceeds62Bytes = 16,
   Exceeds64Bytes = 17,
   NotMultipleOf2 = 18,
-  NotNullTerminated = 19
+  NotNullTerminated = 19,
+  FileNotFound = 20,
+  NotRegularFile = 21,
 };
 } // namespace ole

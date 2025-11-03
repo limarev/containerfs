@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(test_containerfs
+project(ole_test
         DESCRIPTION "Test ole module"
         LANGUAGES CXX)
 
@@ -13,12 +13,12 @@ pkg_search_module(gsf IMPORTED_TARGET libgsf-1)
 
 # Then try to find libgsf globally, whether or not libgsf have been found with pkg-config
 find_program(gsf NAMES gsf REQUIRED PATHS ${gsf_PREFIX}/bin)
-add_executable(read_ole test_read_file.cpp)
+add_executable(filesystem_test filesystem_test.cpp)
 
 find_package(GTest REQUIRED)
-target_link_libraries(read_ole PRIVATE containerfs GTest::gtest_main)
+target_link_libraries(filesystem_test PRIVATE ole::ole GTest::gtest_main)
 
-add_test(NAME read_ole COMMAND read_ole)
+add_test(NAME filesystem_test COMMAND filesystem_test)
 
 include(AddOleFixture.cmake)
 
@@ -26,7 +26,7 @@ add_ole_fixture(
         NAME exists
         OLE_FILE exists.ole
         ROOT_DIR exists
-        BIND_TEST read_ole
+        BIND_TEST filesystem_test
         SPEC
         f:c/c/c.txt
         d:a/a

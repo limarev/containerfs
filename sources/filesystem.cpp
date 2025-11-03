@@ -1,18 +1,7 @@
-#pragma once
-
-#include "containerfs/device_api.h"
-#include "ole_directory.h"
-#include "ole_error.h"
-#include "ole_path.h"
-#include "ole_string.h"
-
-#include <algorithm>
+#include "ole/filesystem.h"
 #include <cassert>
-#include <cstddef>
-#include <iostream>
-#include <iterator>
-#include <ranges>
-#include <stack>
+
+namespace ole {
 
 constexpr std::uint32_t FREESECT = 0xFFFFFFFF;
 constexpr std::uint32_t ENDOFCHAIN = 0xFFFFFFFE;
@@ -43,6 +32,25 @@ struct OleHeader {
   std::array<std::uint32_t, 109> difat{};
 };
 
+struct DirectoryEntryRaw {
+  std::byte object_type;
+  std::byte color_flag;
+  std::uint16_t name_size_in_bytes;
+  std::array<std::byte, 16> clsid;
+  std::uint32_t left_id;
+  std::uint32_t right_id;
+  std::uint32_t child_id;
+  std::uint32_t state_bits;
+  std::uint32_t starting_sector;
+  std::uint64_t creation_time;
+  std::uint64_t modified_time;
+  std::uint64_t stream_size; // in bytes
+  std::array<std::byte, 64> name;
+
+  auto operator<=>(const DirectoryEntryRaw &) const = default;
+};
+}
+
 constexpr auto operator|(std::ranges::range auto &&src, std::ranges::sized_range auto &dst) {
   auto d = std::as_writable_bytes(std::span(dst));
   auto res = std::ranges::copy_n(src.begin(), d.size(), d.begin());
@@ -60,23 +68,23 @@ constexpr auto operator|(std::ranges::range auto &&src, std::byte &dst) {
 }
 
 // Смещение сектора (SID) в байтах (OLE: заголовок = "нулевой сектор")
-constexpr auto sector_offset (fat_t sid, std::uint16_t sector_size) -> std::uint64_t {
+constexpr auto sector_offset (ole::fat_t sid, std::uint16_t sector_size) -> std::uint64_t {
   return (sid + 1) * static_cast<std::uint64_t>(sector_size);
 }
 
-template <typename Device, bool Validate = true>
-std::expected<OleHeader, ole::Error> load_header(Device &device) {
+template <bool Validate = true>
+std::expected<ole::OleHeader, ole::Error> load_header(ole::FileDevice &device) {
   /** header всегда 512 байт:
    * For version 4 compound files, the header size (512 bytes) is less than the sector size (4,096 bytes),
    * so the remaining part of the header (3,584 bytes) MUST be filled with all zeroes.
    */
-  static_assert(sizeof(OleHeader) == 512);
-  std::array<std::byte, sizeof(OleHeader)> buffer{};
+  static_assert(sizeof(ole::OleHeader) == 512);
+  std::array<std::byte, sizeof(ole::OleHeader)> buffer{};
   if (!device.read_at(0, buffer)) {
     return std::unexpected(ole::Error::IoFailure);
   }
   // TODO bitcast to wire type
-  OleHeader hdr{};
+  ole::OleHeader hdr{};
   [[ maybe_unused ]] const auto tail = buffer
   | hdr.magic
   | hdr.clsid
@@ -185,7 +193,7 @@ std::expected<OleHeader, ole::Error> load_header(Device &device) {
      * должны быть оба True либо оба False.
      */
     {
-      const auto exists = hdr.first_mini_fat_sector != ENDOFCHAIN;
+      const auto exists = hdr.first_mini_fat_sector != ole::ENDOFCHAIN;
       const auto at_least_one = hdr.num_mini_fat_sectors != 0;
       if (const auto valid = exists == at_least_one; not valid) {
         return std::unexpected(ole::Error::MiniFatHeaderInconsistent);
@@ -197,16 +205,12 @@ std::expected<OleHeader, ole::Error> load_header(Device &device) {
   return hdr;
 }
 
-inline bool is_reserved_sid(std::uint32_t sid) noexcept {
-  return sid == FREESECT || sid == ENDOFCHAIN || sid == FATSECT || sid == DIFSECT;
-}
-
-template <typename Device, bool Validate = true>
-std::expected<std::vector<fat_t>, ole::Error> load_fat(Device &device, const OleHeader &header) {
+template <bool Validate = true>
+std::expected<std::vector<ole::fat_t>, ole::Error> load_fat(ole::FileDevice &device, const ole::OleHeader &header) {
   const auto sector_size = 1 << header.sector_shift;
 
   // Список sector ID-ов FAT-секторов (строго по csectFat)
-  std::vector<fat_t> fat_sector_ids;
+  std::vector<ole::fat_t> fat_sector_ids;
   fat_sector_ids.reserve(header.num_fat_sectors);
 
   /**
@@ -216,17 +220,17 @@ std::expected<std::vector<fat_t>, ole::Error> load_fat(Device &device, const Ole
    * Зачем так делать непонятно.
    */
   std::ranges::copy_if(header.difat, std::back_inserter(fat_sector_ids),
-                       [](auto sector) { return sector != FREESECT; });
+                       [](auto sector) { return sector != ole::FREESECT; });
 
   // читаем цепочку DIFAT-секторов
-  for (auto next_difat = header.first_difat_sector; next_difat != ENDOFCHAIN;) {
-    std::vector<fat_t> buf(sector_size / sizeof(fat_t));
+  for (auto next_difat = header.first_difat_sector; next_difat != ole::ENDOFCHAIN;) {
+    std::vector<ole::fat_t> buf(sector_size / sizeof(ole::fat_t));
     if (!device.read_at(sector_offset(next_difat, sector_size), as_writable_bytes(std::span{buf}))) [[unlikely]] {
       return std::unexpected(ole::Error::IoFailure);
     }
 
     // читаем весь сектор
-    std::ranges::copy_if(buf, std::back_inserter(fat_sector_ids), [](auto sector) { return sector != FREESECT; });
+    std::ranges::copy_if(buf, std::back_inserter(fat_sector_ids), [](auto sector) { return sector != ole::FREESECT; });
 
     // последняя uint32_t запись в секторе - это номер следующего difat сектора
     next_difat = fat_sector_ids.back();
@@ -239,11 +243,11 @@ std::expected<std::vector<fat_t>, ole::Error> load_fat(Device &device, const Ole
   }
 
   // 2) Читаем сами FAT-сектора и склеиваем единый FAT
-  std::vector<fat_t> fat;
+  std::vector<ole::fat_t> fat;
   fat.reserve(fat_sector_ids.size() * sector_size / sizeof(uint32_t));
 
   for (auto fat_sid : fat_sector_ids) {
-    std::vector<fat_t> buf(sector_size / sizeof(fat_t));
+    std::vector<ole::fat_t> buf(sector_size / sizeof(ole::fat_t));
     if (!device.read_at(sector_offset(fat_sid, sector_size), as_writable_bytes(std::span{buf}))) [[unlikely]] {
       return std::unexpected(ole::Error::IoFailure);
     }
@@ -253,14 +257,14 @@ std::expected<std::vector<fat_t>, ole::Error> load_fat(Device &device, const Ole
   // std::cout << std::format("number fat sectors: expected: {}, actual: {}", header.num_fat_sectors, size(fat)) << '\n';
   // std::ranges::transform(fat, std::ostream_iterator<std::string>(std::cout, "\n"), [](auto v) -> std::string {
   //   switch (v) {
-  //   case FREESECT:
-  //     return "FREESECT";
+  //   case ole::FREESECT:
+  //     return "ole::FREESECT";
   //   case FATSECT:
   //     return "FATSECT";
   //   case DIFSECT:
   //     return "DIFSECT";
-  //   case ENDOFCHAIN:
-  //     return "ENDOFCHAIN";
+  //   case ole::ENDOFCHAIN:
+  //     return "ole::ENDOFCHAIN";
   //   default:
   //     return std::format("{:08X}", v);
   //   }
@@ -269,38 +273,20 @@ std::expected<std::vector<fat_t>, ole::Error> load_fat(Device &device, const Ole
   return fat;
 }
 
-struct DirectoryEntryRaw {
-  std::byte object_type;
-  std::byte color_flag;
-  std::uint16_t name_size_in_bytes;
-  std::array<std::byte, 16> clsid;
-  std::uint32_t left_id;
-  std::uint32_t right_id;
-  std::uint32_t child_id;
-  std::uint32_t state_bits;
-  std::uint32_t starting_sector;
-  std::uint64_t creation_time;
-  std::uint64_t modified_time;
-  std::uint64_t stream_size; // in bytes
-  std::array<std::byte, 64> name;
-
-  auto operator<=>(const DirectoryEntryRaw &) const = default;
-};
-
-template <typename Device, bool Validate = true>
-std::expected<std::vector<DirectoryEntryRaw>, ole::Error> load_directories(Device &device, const OleHeader &header,
-                                                                      const std::vector<fat_t> &fat) {
+template <bool Validate = true>
+std::expected<std::vector<ole::DirectoryEntryRaw>, ole::Error> load_directories(ole::FileDevice &device, const ole::OleHeader &header,
+                                                                      const std::vector<ole::fat_t> &fat) {
   const auto sector_size = 1 << header.sector_shift;
-  static_assert(sizeof(DirectoryEntryRaw) == 128);
+  static_assert(sizeof(ole::DirectoryEntryRaw) == 128);
   // идём по FAT-цепочке, начиная с first_dir_sector. Alloc на 32 временно, потом надо посчитать на сколько именно
   // аллокать
-  std::vector<DirectoryEntryRaw> dir_stream;
+  std::vector<ole::DirectoryEntryRaw> dir_stream;
   dir_stream.reserve(header.num_dir_sectors == 0 ? 32 : header.num_dir_sectors);
 
   // TODO bitcast to wire type
-  for (auto next_sector = header.first_dir_sector; next_sector != ENDOFCHAIN; next_sector = fat[next_sector]) {
+  for (auto next_sector = header.first_dir_sector; next_sector != ole::ENDOFCHAIN; next_sector = fat[next_sector]) {
     // The directory entry size is fixed at 128 bytes.
-    std::vector<DirectoryEntryRaw> buf(sector_size / sizeof(DirectoryEntryRaw));
+    std::vector<ole::DirectoryEntryRaw> buf(sector_size / sizeof(ole::DirectoryEntryRaw));
     if (!device.read_at(sector_offset(next_sector, sector_size), as_writable_bytes(std::span{buf}))) [[unlikely]] {
       return std::unexpected(ole::Error::IoFailure);
     }
@@ -309,8 +295,8 @@ std::expected<std::vector<DirectoryEntryRaw>, ole::Error> load_directories(Devic
   }
 
   for (auto&& dir : dir_stream) {
-    std::span<std::byte, sizeof(DirectoryEntryRaw)> view{reinterpret_cast<std::byte *>(std::addressof(dir)), sizeof(DirectoryEntryRaw)};
-    DirectoryEntryRaw entry{};
+    std::span<std::byte, sizeof(ole::DirectoryEntryRaw)> view{reinterpret_cast<std::byte *>(std::addressof(dir)), sizeof(ole::DirectoryEntryRaw)};
+    ole::DirectoryEntryRaw entry{};
     [[maybe_unused]] const auto tail = view
     | entry.name
     | entry.name_size_in_bytes
@@ -330,24 +316,24 @@ std::expected<std::vector<DirectoryEntryRaw>, ole::Error> load_directories(Devic
     std::swap(entry, dir);
   }
 
-  std::erase(dir_stream, DirectoryEntryRaw {});
+  std::erase(dir_stream, ole::DirectoryEntryRaw {});
   // TODO directory entry validation
 
   return dir_stream;
 }
 
-template <typename Device, bool Validate = true>
-std::expected<std::vector<fat_t>, ole::Error> load_minifat(Device &device, int sector_size, uint32_t first_mini_fat_sector, uint32_t num_mini_fat_sectors, uint32_t mini_sectors_count, const std::vector<fat_t> &fat) {
-  std::vector<fat_t> result; result.reserve(num_mini_fat_sectors);
+template <bool Validate = true>
+std::expected<std::vector<ole::fat_t>, ole::Error> load_minifat(ole::FileDevice &device, int sector_size, uint32_t first_mini_fat_sector, uint32_t num_mini_fat_sectors, uint32_t mini_sectors_count, const std::vector<ole::fat_t> &fat) {
+  std::vector<ole::fat_t> result; result.reserve(num_mini_fat_sectors);
 
   // читаем цепочку miniFAT-секторов
-  for (auto next_sector = first_mini_fat_sector; next_sector != ENDOFCHAIN; next_sector = fat[next_sector]) {
-    std::vector<fat_t> buf(sector_size / sizeof(fat_t));
+  for (auto next_sector = first_mini_fat_sector; next_sector != ole::ENDOFCHAIN; next_sector = fat[next_sector]) {
+    std::vector<ole::fat_t> buf(sector_size / sizeof(ole::fat_t));
     if (!device.read_at(sector_offset(next_sector, sector_size), as_writable_bytes(std::span{buf}))) [[unlikely]] {
       return std::unexpected(ole::Error::IoFailure);
     }
     // читаем весь сектор
-    std::ranges::copy_if(buf, std::back_inserter(result), [](auto sector) { return sector != FREESECT; });
+    std::ranges::copy_if(buf, std::back_inserter(result), [](auto sector) { return sector != ole::FREESECT; });
   }
 
   if constexpr (Validate) {
@@ -359,86 +345,101 @@ std::expected<std::vector<fat_t>, ole::Error> load_minifat(Device &device, int s
   return result;
 }
 
-template <typename Device> class OleDriver final {
-public:
-  using error_type = ole::Error;
-
-  static std::expected<OleDriver, error_type> create(Device &&dev) {
-    auto header = load_header(dev);
-    if (not header) {
-      return std::unexpected(header.error());
-    }
-
-    auto fat = load_fat(dev, *header);
-    if (not fat) {
-      return std::unexpected(fat.error());
-    }
-
-    auto directories = load_directories(dev, *header, *fat);
-    if (not directories) {
-      return std::unexpected(directories.error());
-    }
-
-    auto mini_sectors_count = directories->front().stream_size / (1 << header->mini_sector_shift);
-    auto minifat = load_minifat(dev, 1 << header->sector_shift, header->first_mini_fat_sector, header->num_mini_fat_sectors, mini_sectors_count, *fat);
-    if (not minifat) {
-      return std::unexpected(minifat.error());
-    }
-
-    std::vector<ole::DirectoryEntry> dirs; dirs.reserve(directories->size());
-    for (const auto& entry : *directories) {
-      ole::DirectoryEntry new_entry {};
-
-      auto name = ole::String::make(entry.name, entry.name_size_in_bytes);
-      if (not name) {
-        return std::unexpected(name.error());
-      }
-
-      new_entry.type = static_cast<ole::file_type>(entry.object_type);
-      new_entry.name = std::move(*name);
-      new_entry.left_id = entry.left_id;
-      new_entry.right_id = entry.right_id;
-      new_entry.child_id = entry.child_id;
-      new_entry.starting_sector = entry.starting_sector;
-      new_entry.creation_time = entry.creation_time;
-      new_entry.modified_time = entry.modified_time;
-      new_entry.stream_size = entry.stream_size;
-
-      dirs.push_back(std::move(new_entry));
-    }
-
-    // auto ministream = load_ministream(dev);
-    // if (not ministream) {
-    //   return std::unexpected(ministream.error());
-    // }
-
-    OleDriver driver{std::move(dev)};
-    driver.dirs_ = std::move(dirs);
-
-    return driver;
+std::expected<ole::Filesystem, ole::Filesystem::error_type> ole::Filesystem::mount(FileDevice &&dev) {
+  auto header = load_header(dev);
+  if (not header) {
+    return std::unexpected(header.error());
   }
 
-  // --- публичный API (пока заглушки) ---
-  std::vector<std::byte> read_file(const std::filesystem::path &) { return {}; }
-
-  [[nodiscard]] bool exists(const ole::Path& path) const noexcept {
-    using namespace std::ranges;
-    std::size_t root = dirs_.front().child_id;
-
-    ole::Path result;
-    for (auto[entry, _] : views::zip(PathResolve(dirs_, path, root), path)) {
-      result.append(entry.name);
-    }
-
-    return !result.empty() && result == path;
+  auto fat = load_fat(dev, *header);
+  if (not fat) {
+    return std::unexpected(fat.error());
   }
 
-  int file_size(const std::filesystem::path &) const noexcept { return -1; }
-  bool is_directory(const std::filesystem::path &) const noexcept { return false; }
+  auto directories = load_directories(dev, *header, *fat);
+  if (not directories) {
+    return std::unexpected(directories.error());
+  }
 
-private:
-  explicit OleDriver(Device &&dev) : dev_{std::move(dev)} {}
+  auto mini_sectors_count = directories->front().stream_size / (1 << header->mini_sector_shift);
+  auto minifat = load_minifat(dev, 1 << header->sector_shift, header->first_mini_fat_sector, header->num_mini_fat_sectors, mini_sectors_count, *fat);
+  if (not minifat) {
+    return std::unexpected(minifat.error());
+  }
 
-  Device dev_;
-  std::vector<ole::DirectoryEntry> dirs_ {};
-};
+  std::vector<ole::DirectoryEntry> dirs; dirs.reserve(directories->size());
+  for (const auto& entry : *directories) {
+    ole::DirectoryEntry new_entry {};
+
+    auto name = ole::String::make(entry.name, entry.name_size_in_bytes);
+    if (not name) {
+      return std::unexpected(name.error());
+    }
+
+    new_entry.type = static_cast<ole::file_type>(entry.object_type);
+    new_entry.name = std::move(*name);
+    new_entry.left_id = entry.left_id;
+    new_entry.right_id = entry.right_id;
+    new_entry.child_id = entry.child_id;
+    new_entry.starting_sector = entry.starting_sector;
+    new_entry.creation_time = entry.creation_time;
+    new_entry.modified_time = entry.modified_time;
+    new_entry.stream_size = entry.stream_size;
+
+    dirs.push_back(std::move(new_entry));
+  }
+
+  // auto ministream = load_ministream(dev);
+  // if (not ministream) {
+  //   return std::unexpected(ministream.error());
+  // }
+
+  Filesystem driver{std::move(dev)};
+  driver.dirs_ = std::move(dirs);
+
+  return driver;
+}
+
+[[nodiscard]] bool ole::Filesystem::exists(const ole::Path& path) const noexcept {
+  using namespace std::ranges;
+  std::size_t root = dirs_.front().child_id;
+
+  ole::Path result;
+  for (auto[entry, _] : views::zip(PathResolve(dirs_, path, root), path)) {
+    result.append(entry.name);
+  }
+
+  return !result.empty() && result == path;
+}
+
+[[nodiscard]] std::expected<int, ole::Filesystem::error_type> ole::Filesystem::file_size(const Path& path) const noexcept {
+  using namespace std::ranges;
+
+  if (empty(path)) [[unlikely]] {
+    return std::unexpected(Error::FileNotFound);
+  }
+
+  std::size_t root = dirs_.front().child_id;
+
+  Path result;
+  auto found = std::cref(dirs_.front());
+  for (auto[entry, _] : views::zip(PathResolve(dirs_, path, root), path)) {
+    result.append(entry.name);
+    found = std::cref(entry);
+  }
+
+  if (result != path) {
+    return std::unexpected(Error::FileNotFound);
+  }
+
+  if (found.get().type != file_type::regular) {
+    return std::unexpected(Error::NotRegularFile);
+  }
+
+  return found.get().stream_size;
+}
+
+[[nodiscard]] bool ole::Filesystem::is_directory(const Path& path) const noexcept { return false; }
+[[nodiscard]] bool ole::Filesystem::is_regular_file(const Path& path) const noexcept { return false; }
+
+ole::Filesystem::Filesystem(FileDevice &&dev) : dev_{std::move(dev)} {}
